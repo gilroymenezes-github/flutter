@@ -1,10 +1,223 @@
+import 'dart:convert';
+import 'dart:developer';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_appauth/flutter_appauth.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+final FlutterAppAuth appAuth = FlutterAppAuth();
+const FlutterSecureStorage secureStorage = FlutterSecureStorage();
+
+const String PU_AUTH_DOMAIN = 'localhost:5001';
+const String PU_AUTH_CLIENT_ID = "business.gui.local";
+const String PU_AUTH_REDIRECT_URI = 'http://localhost:61903/login-callback';
+const String PU_AUTH_ISSUER = 'https://$PU_AUTH_DOMAIN';
 
 void main() {
   runApp(MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
+  const MyApp({Key key}) : super(key: key);
+
+  @override
+  _MyAppState createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  bool isBusy = false;
+  bool isLoggedIn = false;
+  String errorMessage;
+  String name;
+  String picture;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Auth on Flutter',
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Auth on Flutter Demo'),
+        ),
+        body: Center(
+          child: isBusy
+              ? const CircularProgressIndicator()
+              : isLoggedIn
+                  ? Profile(logoutAction, name, picture)
+                  : Login(loginAction, errorMessage),
+        ),
+      ),
+    );
+  }
+
+  Future<Map<String, Object>> getUserDetails(String accessToken) async {
+    const String url = 'https://$PU_AUTH_DOMAIN/oauth2/userinfo';
+    final http.Response response = await http.get(
+      url,
+      headers: <String, String>{'Authorization': 'Bearer $accessToken'},
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Failed to get user details');
+    }
+  }
+
+  Future<void> loginAction() async {
+    setState(() {
+      isBusy = true;
+      errorMessage = '';
+    });
+
+    try {
+      debugPrint('$PU_AUTH_ISSUER');
+      final AuthorizationTokenResponse result =
+          await appAuth.authorizeAndExchangeCode(
+        AuthorizationTokenRequest(
+          PU_AUTH_CLIENT_ID,
+          PU_AUTH_REDIRECT_URI,
+          issuer: PU_AUTH_ISSUER,
+          scopes: <String>[
+            'openid',
+            'profile',
+            'businessapi',
+            "position",
+            "unit",
+            "role"
+          ],
+        ),
+      );
+
+      log('data: $result');
+      final Map<String, Object> profile =
+          await getUserDetails(result.accessToken);
+
+      debugPrint('response: $profile');
+      await secureStorage.write(
+          key: 'refresh_token', value: result.refreshToken);
+
+      setState(() {
+        isBusy = false;
+        isLoggedIn = true;
+        name = profile['email'];
+      });
+    } on Exception catch (e, s) {
+      debugPrint('login error: $e - stack $s');
+      setState(() {
+        isBusy = false;
+        isLoggedIn = false;
+        errorMessage = e.toString();
+      });
+    }
+  }
+
+  Future<void> initAction() async {
+    final String storedRefreshToken =
+        await secureStorage.read(key: 'refesh_token');
+    if (storedRefreshToken == null) return;
+
+    setState(() {
+      isBusy = true;
+    });
+
+    try {
+      final TokenResponse response = await appAuth.token(TokenRequest(
+        PU_AUTH_CLIENT_ID,
+        PU_AUTH_REDIRECT_URI,
+        issuer: PU_AUTH_ISSUER,
+        refreshToken: storedRefreshToken,
+      ));
+
+      final Map<String, Object> profile =
+          await getUserDetails(response.accessToken);
+
+      await secureStorage.write(
+          key: 'refresh_token', value: response.refreshToken);
+
+      setState(() {
+        isBusy = false;
+        isLoggedIn = true;
+        name = profile['email'];
+      });
+    } on Exception catch (e, s) {
+      debugPrint('error on refresh token: $e - stack: $s');
+      await logoutAction();
+    }
+  }
+
+  Future<void> logoutAction() async {
+    await secureStorage.delete(key: 'refresh_token');
+    setState(() {
+      isLoggedIn = false;
+      isBusy = false;
+    });
+  }
+}
+
+class Login extends StatelessWidget {
+  final Future<void> Function() loginAction;
+  final String loginError;
+
+  const Login(this.loginAction, this.loginError, {Key key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: <Widget>[
+        RaisedButton(
+          onPressed: () async {
+            await loginAction();
+          },
+          child: const Text('Login'),
+        ),
+        Text(loginError ?? ''),
+      ],
+    );
+  }
+}
+
+class Profile extends StatelessWidget {
+  final Future<void> Function() logoutAction;
+  final String name;
+  final String picture;
+
+  const Profile(this.logoutAction, this.name, this.picture, {Key key})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: <Widget>[
+        Container(
+          width: 200,
+          height: 200,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.orange, width: 4),
+            shape: BoxShape.circle,
+            image: DecorationImage(
+              fit: BoxFit.fill,
+              image: NetworkImage(picture ?? ''),
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text('Name: $name'),
+        const SizedBox(height: 48),
+        RaisedButton(
+          onPressed: () async {
+            await logoutAction();
+          },
+          child: const Text('Logout'),
+        ),
+      ],
+    );
+  }
+}
+
+class MyApp2 extends StatelessWidget {
   // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
